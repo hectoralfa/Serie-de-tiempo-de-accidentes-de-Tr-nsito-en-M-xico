@@ -1,0 +1,646 @@
+---
+output: pdf_document
+#lang: es-ES
+toc: TRUE
+---
+
+\pagebreak
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE, error=FALSE}
+knitr::opts_chunk$set(echo = F, warning = F, message = F, error = F)
+setwd("~/Estadisticas/3")
+library(forecast)
+library(reticulate)
+library(timeSeries)
+library(nortest)
+library(tseries)
+library(TSA)
+library(lmtest)
+library(ggplot2)
+library(printr)
+library(tsdl)
+library(imputeTS)
+library(dygraphs)
+library(itsmr)
+library(tsdl)
+library(dplyr)
+library(tidyr)
+```
+
+# Introducción
+
+La base de datos fue generada a partir del acopio y procesamiento de los datos alusivos a los accidentes ocurren de manera nacional. Esta información contribuyó a la planeación, organización del transporte y la prevención de accidentes.
+
+En 1997 inició la etapa de descentralización de actividades con el propósito de que el levantamiento de los datos sea más eficiente con ello eliminar rezagos en el suministro de la información, coadyuvando a la generación y difusión de la Estadística ATUS en forma oportuna.
+
+En la etapa de descentralización, el ámbito regional del INEGI desempeñó el papel principal al asumir el desarrollo de las actividades referentes al levantamiento, procesamiento de la información e integración de bases de datos.
+
+El objetivo de la base de datos es producir información anual sobre la siniestralidad del transporte terrestre a nivel nacional, entidad federativa y municipio, mediante el acopio y procesamiento de datos alusivos a los accidentes ocurridos en zonas federales y no federales, contribuyendo con ello a la planeación y organización del transporte.
+
+Para fines del proyecto, nos enfocaremos en la serie de tiempo sobre el total de accidentes (Fatales, no fatales, sin daños) que hubo desde 1997 que fue el primer año en almacenar los datos hasta el 2019, ya que el 2020 puede presentar fallas o sesgos, debido a que es el último año de registro.
+
+\pagebreak
+
+
+# Análisis de la serie
+
+```{r}
+Datos = read.csv("accidentes_vehiculos2.csv")
+filtrados<- Datos%>%select(ene,feb,mar,abr,may,jun,jul,ago,sep,oct,nov,dic)
+#fill_2<-filtrados%>%group_by(year)%>%summarise(ts=sum(suicides_no))
+#head(filtrados)
+#filtrados<-filtrados[15:23,]
+#head(fill_2)
+#datis<-fil_sex%>%pivot_wider(names_from = age, values_from = suicides_no)
+
+
+
+#1:9
+caja<-c()
+for(i in 1:23){
+  for(j in 1:12){ 
+    guardar<-filtrados[i,j]
+    caja<-c(caja,guardar)
+  }  
+}  
+
+#caja
+
+#class(caja)
+
+datos_st<- ts(caja,start = c(1997,1),end =c(2019,12),frequency = 12)
+datos_st
+```
+Para anlizar nuestra serie de tiempo, podemos descomponerla.
+
+```{r, out.width="55%"}
+plot(decompose(datos_st))
+tsdisplay(datos_st, main = "Serie de tiempo \n Accidentes de Tránsito") 
+
+```
+
+
+Nuestra Serie presenta una tendencia creciente ede 1997 a 2008 o 2009 mientras que entre 2010 y 2011 hay un cambio drástico, después se estaviliza la serie, también notamos que los ciclos con anuales, aunque no se alcanzan a diferenciar bien.
+
+Antes de trabajar con la Serie de tiempo, vamos tenermos que verificar los supuesto de homocedasticidad y estacionariedad.
+
+Cuyos supuestos se basaron mediante el test de Breusch-Pagan para homocedasticidad, Dickey-Fuller y Kwiatkowski-Phillips-Schmidt-Shin para estacionariedad.
+
+Recordando el contraste de hipótesis para Homocedasticidad con bptest.
+$$H_{0}:\text{La varianza es constante (Homocedastisidad) } vs~H_{a} \text{La varianza no es constante (Heterocedasticidad)}$$
+Contraste con adf.test para estacionariedad.
+
+$$H_{0}: \text{La serie no es estacionaria }vs~ H_{a}:\text{La serie es estacionaria}$$
+Contraste con kpss.test para estacionariedad.
+$$H_{0}: \text{La serie es estacionaria }vs~ H_{a}:\text{La serie no es estacionaria}$$
+Mediante estos contrastes de hipótesis se hizo una transformación Box-Cox con el método _loglik_.
+
+```{r}
+lambda1 = BoxCox.lambda(datos_st, method = "loglik");datos.ts1 = log(datos_st)
+plot(datos.ts1, col = "plum", lwd = 3, xlab = "Tiempo", ylab = " ",
+     main = paste("Transformacion BoxCox lambda = ", lambda1) )
+T1 = seq(1, length(datos.ts1), by = 1)
+length(T1)==length(datos.ts1)
+bptest(datos.ts1 ~ T1) 
+adf.test(datos.ts1)
+
+kpss.test(datos.ts1)
+
+```
+
+Y notamos que nuestra serie no cumple homocedasticidad ni estacionariedad. Por esta razón aplicamos una diferencia y notamos los resultados.
+
+```{r}
+plot(diff(datos_st), col = "gold", lwd = 2, xlab = "Tiempo", ylab = " ",
+     main = "Serie homoscedastica con un diferencia" )
+T1 = seq(1, length(diff(datos_st)), by = 1)
+length(T1)==length(diff(datos_st))
+
+bptest(diff(datos_st) ~ T1)
+adf.test(diff(datos_st))
+kpss.test(diff(datos_st))
+
+```
+
+Con una diferencia podemos notar que nuestra serie cumple el supuesto de homocedasticidad y estacionariedad.
+
+
+El método usado en este estudio, será Box-Jenkins, este método consta de tres etapas:
+
+
+  - **Primera etapa:** Identificación de los parámetros d,p,q y D,P,Q
+  
+  
+  - **Segunda etapa:** Estimación de los coeficientes.
+  
+  
+  - **Tercera etapa:** Verificación de los supuestos.
+  
+
+Después de la verificación de supuestos hacemos la predicción. En éste proyecto, nuestra predicción será de dos años.
+
+# Modelos
+
+Propusimos 4 modelos con Box-Jenkings.
+
+El primero modelo que se propuso fue un ARMA(11,23), esto se hizo guiandonos por los gráficos de autocorrelación ACF y PACF. Otro modelo que se propuso, fue una SARIMA(0,1,1)(0,1,1)[12], esto fue mediante la función autoarima del paquete *forecast*. Mientras que los otros dos modelos, se construyeron basandonos en el autoarima y en los supuestos, donde el tercer modelo es un SARIMA(0,0,1)(0,2,2)[12] y SARIMA(6,0,3)(0,2,3)[12]
+
+```{r}
+datos_dif=diff(datos_st)
+primer_ajuste<-arima(datos_dif, order = c(11,0,15),  include.mean = F)
+segundo_ajuste <- arima(datos_st, c(0, 1, 1), seasonal = list(order = c(0, 1, 1), period = 12))
+tercer_ajuste <- arima(datos_st, c(0, 0, 1), seasonal = list(order = c(0, 2, 3), period = 12))
+cuarto_ajuste <- arima(datos_st, c(6, 0, 3), seasonal = list(order = c(0, 2, 3), period = 12))
+
+```
+# Verificación de supuestos
+
+## Normalidad
+
+Para todos los ajustes se verificó normalidad mediante Anderson-Darl.ing y Jarque-Bera
+
+**Modelo 1**
+```{r}
+ad.test(primer_ajuste$residuals)
+#Jarque-Bera Test. tseries
+jarque.bera.test(primer_ajuste$residuals)
+
+```
+
+Notamos que aunque AD nos dice que por poco la cumple, además de que este es un modelo excesivamente grande, por lo tanto no cumple normalidad.
+
+**Modelo 2**
+
+```{r}
+ad.test(segundo_ajuste$residuals)#No cumple normalidad
+#Jarque-Bera Test. tseries
+jarque.bera.test(segundo_ajuste$residuals)
+
+```
+Para este modelo, tenemos las situación de que tampoco cumple normalidad, el p-value disminuyó, pero no fue tanto comparado a que los parámetros son pequeños.
+
+**Modelo 3**
+
+```{r}
+ad.test(tercer_ajuste$residuals)#No cumple normalidad
+#Jarque-Bera Test. tseries
+jarque.bera.test(tercer_ajuste$residuals)
+```
+Este modelo diriamos que pasa normalidad, pues Jarque-Bera es un buen indicador de normalidad para las series de tiempo.
+
+**Modelo 4**
+
+```{r}
+ad.test(cuarto_ajuste$residuals)#No cumple normalidad
+#Jarque-Bera Test. tseries
+jarque.bera.test(cuarto_ajuste$residuals)
+```
+Si no nos ponemos muy exigentes, diriamos que el modelo también pasa normalidad.
+
+```{r}
+par(mfrow=c(2,2))
+
+qqnorm(primer_ajuste$residuals, main = "Modelo 1")
+qqline(primer_ajuste$residuals, col="red", lwd=2)
+
+qqnorm(segundo_ajuste$residuals, main = "Modelo 2")
+qqline(segundo_ajuste$residuals, col="blue", lwd=2)
+
+qqnorm(tercer_ajuste$residuals, main = "Modelo 3")
+qqline(tercer_ajuste$residuals, col="green", lwd=2)
+
+qqnorm(tercer_ajuste$residuals, main = "Modelo 4")
+qqline(tercer_ajuste$residuals, col="orange", lwd=2)
+```
+
+
+## Varianza constante.
+
+La varianza constante se verificó mediante bptest, cuyo contraste de hipótesis es:
+$$H_{0}:\text{La varianza es constante (Homocedastisidad) } vs~H_{a}: \text{La varianza no es constante (Heterocedasticidad)}$$
+**Modelo 1**
+
+```{r}
+Y <- as.numeric(primer_ajuste$residuals)
+X <- 1:length(primer_ajuste$residuals)
+bptest(Y ~ X)
+```
+**Modelo 2**
+
+```{r}
+
+Y <- as.numeric(segundo_ajuste$residuals)
+X <- 1:length(segundo_ajuste$residuals)
+bptest(Y ~ X)
+```
+**Modelo 3**
+```{r}
+
+Y <- as.numeric(tercer_ajuste$residuals)
+X <- 1:length(tercer_ajuste$residuals)
+bptest(Y ~ X)
+```
+**Modelo 4**
+```{r}
+
+Y <- as.numeric(cuarto_ajuste$residuals)
+X <- 1:length(cuarto_ajuste$residuals)
+bptest(Y ~ X)
+```
+Aquí, todos nuestros modelos tienen varianza constante.
+
+## Media cero.
+
+Usamos t.test para verificar si nuestro modelo tiene media cero, donde el contraste es el siguiente.
+
+$$H_{0}:\text{La media es igual a cero } vs~H_{a}: \text{La media no es igual a cero }$$
+**Modelo 1**
+
+```{r}
+t.test(primer_ajuste$residuals,mu=0)
+```
+**Modelo 2**
+
+```{r}
+t.test(segundo_ajuste$residuals,mu=0)
+
+```
+
+**Modelo 3**
+
+```{r}
+t.test(tercer_ajuste$residuals,mu=0)
+
+```
+
+**Modelo 4**
+
+```{r}
+t.test(cuarto_ajuste$residuals,mu=0)
+```
+De nuevo, todos nuestros modelos tienen media cero.
+
+## Independencia.
+
+Utilizaremos la prueba de Ljung-Box, que comprueba si una serie de observaciones en un período de tiempo específico son aleatorias e independientes. Este supuesto lo optendremos mediante gráficos.
+
+```{r, out.width="55%"}
+tsdiag(primer_ajuste,gof.lag = 65)
+
+tsdiag(segundo_ajuste,gof.lag = 50)
+
+```
+```{r, out.width="55%"}
+tsdiag(tercer_ajuste,gof.lag = 50)
+
+tsdiag(cuarto_ajuste,gof.lag = 50)
+```
+
+Unicamente el último pasa el supuesto de independencia, que fue el SARIMA(6,0,3)(0,2,3)[12]
+
+Hacemos un cuadro comparativo para comparar los supuestos de los modelos.
+\begin{center}
+\begin{tabular}{|c|c|c|c|c|} \hline
+    Modelo & Normalidad & Variable Cte & Media cero & Independencia  \\\hline
+    Primer & no & si & si & no \\\hline
+    Segundo & no & si & si & no \\\hline
+    Tercer & si & si & si & no \\\hline
+    Cuarto & si & si & si & si\\\hline
+\end{tabular}
+\end{center}
+
+Por otro lado vamos a comparar los errores de los modelos y sus respectivo AIC y BIC
+
+```{r}
+comparar_=cbind("ARMA(11,23)",round(primer_ajuste$aic,4),round(BIC(primer_ajuste),4), round(mean(primer_ajuste$residuals),4),
+                round(mean(abs(primer_ajuste$residuals)),4),sqrt(mean((primer_ajuste$residuals)^2)),26)
+
+comparar_2=cbind("ARIMA(0,1,1)(0,1,1)",round(segundo_ajuste$aic,4),round(BIC(segundo_ajuste),4), round(mean(segundo_ajuste$residuals),4),
+                 round(mean(abs(segundo_ajuste$residuals)),4),sqrt(mean((segundo_ajuste$residuals)^2)),2)
+comparar_3=cbind("ARIMA(0,0,1))(0,2,3)",round(tercer_ajuste$aic,4),round(BIC(tercer_ajuste),4), round(mean(tercer_ajuste$residuals),4),
+                 round(mean(abs(tercer_ajuste$residuals)),4),sqrt(mean((tercer_ajuste$residuals)^2)),4)
+comparar_4=cbind("ARIMA(6,0,3))(0,2,3)",round(cuarto_ajuste$aic,4),round(BIC(cuarto_ajuste),4), round(mean(cuarto_ajuste$residuals),4),
+                 round(mean(abs(cuarto_ajuste$residuals)),4),sqrt(mean((cuarto_ajuste$residuals)^2)),12)
+
+nombres=cbind("AJUSTE", "AIC", "BIC","ME","MAE", "RMSE", "Parámetros")
+
+resultados<-rbind(comparar_,comparar_2, comparar_3, comparar_4)
+resultados<-as.table(resultados)
+colnames(resultados)=c("AJUSTE", "AIC", "BIC","ME","MAE", "RMSE", "Parámetros")
+rownames(resultados)=c("","","","")
+
+(resultados)
+```
+El primer modelo tiene muchos parámetros a estimar y la mitad de ellos contienen al cero, por lo que no es una buena propuesta de modelo, el segundo ajuste solamente tiene 2 parámetros a estimar y ninguno contiene al cero, el tercer ajuste tiene 4 parámetros y solamente 1 de ellos contiene al cero, mientras que el cuarto ajuste tiene 12 parámetros a estimar y uno de ellos contiene al cero.
+
+Basandonos en el modelos de AIC nos quedariamos con ARIMA(6,0,3))(0,2,3) además de que pasa todos los supuestos, pero son demaciados parámetros y la mitad de ellos contienen al cero, por lo que no es un buen ajuste, igual que el primer modelo, tiene demasiados parámetros.
+
+Por otro lado, el tercer modelo, es buena opción, aunque estamos sobreajustando el modelo,la razón es la siguiente.
+
+```{r}
+var(diff(datos_st))
+var(diff(diff(datos_st)))
+var(diff(datos_st,lag=1,diff=1))
+var(diff(datos_st,lag=12,diff=1))
+var(diff(diff(datos_st,lag=1,diff=1),lag=12,diff=1))
+var(diff(diff(datos_st,lag=1,diff=2),lag=12,diff=1))
+var(diff(diff(datos_st,lag=1,diff=1),lag=12,diff=2))
+var(diff(diff(datos_st,lag=1,diff=1),lag=12,diff=2))
+```
+Por lo que nos quedariamos con el modelo 
+
+##Forecast
+
+Como mencionamos antes, la predicción la haremos por 3 años.
+
+```{r}
+ARMA_forecast2 <- predict(segundo_ajuste, n.ahead =12*2)$pred
+
+ARMA_forecast_se2 <- predict(segundo_ajuste, n.ahead = 12*2)$se
+ts.plot(datos_st, xlim=c(1997,2022),  main="Predicción")
+points(ARMA_forecast2, type = "l", col = 2)
+points(ARMA_forecast2 - qnorm(0.975)*ARMA_forecast_se2, type = "l", col ="blue", lty = 2)
+points(ARMA_forecast2 + qnorm(0.975)*ARMA_forecast_se2, type = "l", col ="blue", lty = 2)
+
+ARMA_forecast2
+```
+
+Notamos que sus bandas de confianza son muy amplias, por lo que podemos probar con un suavizamiento exponencias y despues podemos comparar resultados.
+
+# Holt-Winters
+
+Holt-Winters es un método de pronóstico de triple exponente suavizante y tiene la ventaja de ser fácil de adaptarse a medida que nueva información real está disponible. Holt-Winters considera nivel, tendencia y estacionalidad de una serie de tiempo. Este método tienen dos modelos principales, dependiendo del tipo de estacionalidad; modelo multiplicativo estacional y aditivo estacional.
+
+Al ver la serie completa, vemos que tiene cara de un modelo multiplicativo, salvo en los últimos 8 años.
+
+```{r}
+tt<-HoltWinters(datos_st, seasonal = "multiplicative")
+plot(datos_st, ylab="Ajuste", xlim=c(1997,2019), main="Holt-Winters \n Serie completa")
+#summary(tt1)
+lines(tt$fitted[,1], lty=4, col="red")
+```
+
+El ajuste es un poco bueno, veamos si las bandas de confianza mejoran con la predicción.
+
+```{r}
+HW3 <- HoltWinters(datos_st, seasonal = "multiplicative")
+HW3.pred <- predict(HW3, 24, prediction.interval = TRUE, level=0.95)
+plot(datos_st, ylab="candy production", xlim=c(1997,2021), main="Predicción")
+lines(HW3.pred[,1], col="red")
+lines(HW3.pred[,2], lty=4, col="blue")
+lines(HW3.pred[,3], lty=4, col="blue")
+```
+
+Podemos notar que las bandas de confiansa mejoran, entonces la mejor opción es el ajuste con Holt-Winters,
+
+```{r, fig.width= 8, fig.height=10, fig.cap=paste("Comparación de métodos")}
+par(mfrow=c(2,1))
+
+plot(datos_st, ylab="candy production", xlim=c(1997,2021), main="Holt-Winters")
+lines(HW3.pred[,1], col="red")
+lines(HW3.pred[,2], lty=4, col="blue")
+lines(HW3.pred[,3], lty=4, col="blue")
+
+ts.plot(datos_st, xlim=c(1997,2021),  main="Box-Jenkins")
+points(ARMA_forecast2, type = "l", col = 2)
+points(ARMA_forecast2 - qnorm(0.975)*ARMA_forecast_se2, type = "l", col ="blue", lty = 2)
+points(ARMA_forecast2 + qnorm(0.975)*ARMA_forecast_se2, type = "l", col ="blue", lty = 2)
+```
+Notamos que nuestra Serie de tiempo tiene un cambio de tendencia a finales de 2010, pues de una tendencia creciente, pasamos a una tendencia decreciente, debido a cambiso demográficos o políticos.
+
+Por ello, analizamos nuestra serie de tiempo a partir de el 2011, ya que consideramos que sigue un proceso constante.
+
+# Serie 2011-2019
+```{r}
+#Datos = read.csv("accidentes_vehiculos2.csv")
+filtrados<- Datos%>%select(ene,feb,mar,abr,may,jun,jul,ago,sep,oct,nov,dic)
+#fill_2<-filtrados%>%group_by(year)%>%summarise(ts=sum(suicides_no))
+#head(filtrados)
+filtrados<-filtrados[15:23,]
+#head(fill_2)
+#datis<-fil_sex%>%pivot_wider(names_from = age, values_from = suicides_no)
+
+
+
+#1:9
+caja<-c()
+for(i in 1:9){
+  for(j in 1:12){ 
+    guardar<-filtrados[i,j]
+    caja<-c(caja,guardar)
+  }  
+}  
+
+#caja
+
+#class(caja)
+
+datos_st<- ts(caja,start = c(2011,1),end =c(2019,12),frequency = 12)
+datos_st
+plot(decompose(datos_st))
+
+```
+
+La serie ya modificada tiene una tendencia un poco más constante, los ciclos son anuales, aunque no se notan mucho.
+
+Con Box-Jenkins elegeimos el modelo que nos arrojó autoarima, entonces aqui vamos implementar la función autoarima para después comparar con Holt Winters.
+
+```{r}
+fi1<-auto.arima(datos_st)
+confint(fi1)
+```
+Notamos que cambia considerablemente el ajuste.
+
+Nuestro modelo a comparar es SARIMA(3,0,1)(2,1,0)[12]
+
+# Verificación de Supuestos
+
+**Normalidad**
+```{r, out.width="60%"}
+qqnorm(fi1$residuals)
+qqline(fi1$residuals, col="red", lwd=2)
+#Prueba Anderson-Darling
+ad.test(fi1$residuals)
+#Jarque-Bera Test. tseries
+jarque.bera.test(fi1$residuals)
+```
+
+No pasa normalidad
+
+**Varianza constante**
+
+```{r}
+Y <- as.numeric(fi1$residuals)
+X <- 1:length(fi1$residuals)
+bptest(Y ~ X)
+```
+Tiene varianza constante
+
+**Media cero**
+```{r}
+t.test(fi1$residuals,mu=0)
+
+```
+Tiene media cero
+
+**Independencia**
+```{r}
+tsdiag(fi1,gof.lag = 100)
+
+```
+Cumple independencia.
+
+Nuestro modelo nos arroja que tenemos un ruido blanco no gaussiano.
+
+# Holt-Winters 2011-2019
+
+```{r}
+HW3 <- HoltWinters(datos_st)
+HW3.pred <- predict(HW3, 24, prediction.interval = TRUE, level=0.95)
+plot(datos_st, ylab="candy production", xlim=c(2011,2019), main="Holt-Winters")
+lines(HW3$fitted[,1], lty=4, col="orange")
+```
+Notamos que nuestro ajuste es ligeramente bueno.
+
+# Comparación de predicción
+
+
+```{r, fig.width= 8, fig.height=10, fig.cap=paste("Comparación de métodos 2011-2019"),}
+par(mfrow=c(2,1))
+
+plot(datos_st, ylab="candy production", xlim=c(2011,2021), main="Holt-Winters")
+lines(HW3.pred[,1], col="red")
+lines(HW3.pred[,2], lty=4, col="blue")
+lines(HW3.pred[,3], lty=4, col="blue")
+
+ARMA_forecast2 <- predict(fi1, n.ahead =12*2)$pred
+
+ARMA_forecast_se2 <- predict(fi1, n.ahead = 12*2)$se
+ts.plot(datos_st, xlim=c(2011,2022),  main="Box-Jenkins")
+points(ARMA_forecast2, type = "l", col = 2)
+points(ARMA_forecast2 - qnorm(0.975)*ARMA_forecast_se2, type = "l", col ="blue", lty = 2)
+points(ARMA_forecast2 + qnorm(0.975)*ARMA_forecast_se2, type = "l", col ="blue", lty = 2)
+
+```
+De nuevo pensamos que modelando con Holt-Winters es la mejor opción pero para salir de dudas harémos Back Testing.
+
+# Back Testing
+
+Se intentó hacer de back testing para decidir cuál serie de tiempo es más óptima para predecir. Mediante Holt-Winters comparamos los errores cuadráticos de la serie completa vs la serie que comienza en 2011.El año 2019 será nuestra base de prueba.
+
+```{r}
+filtrados<- Datos%>%select(ene,feb,mar,abr,may,jun,jul,ago,sep,oct,nov,dic)
+#fill_2<-filtrados%>%group_by(year)%>%summarise(ts=sum(suicides_no))
+#head(filtrados)
+#filtrados<-filtrados[15:23,]
+#head(fill_2)
+#datis<-fil_sex%>%pivot_wider(names_from = age, values_from = suicides_no)
+
+
+
+#1:9
+caja<-c()
+for(i in 1:22){
+  for(j in 1:12){ 
+    guardar<-filtrados[i,j]
+    caja<-c(caja,guardar)
+  }  
+}  
+
+#caja
+
+#class(caja)
+
+datos_st<- ts(caja,start = c(1997,1),end =c(2018,12),frequency = 12)
+datos_st
+#tsdisplay(datos_st) 
+#ts.plot(datos_st)
+#dygraph(datos_st, main="Serie de tiempo", ylab="", xlab="")
+
+#plot(decompose(datos_st))
+segundo_ajuste<-auto.arima(datos_st)
+
+caja2<-c()
+for(i in 1:8){
+  for(j in 1:12){ 
+    guardar<-filtrados[i+14,j]
+    caja2<-c(caja2,guardar)
+  }  
+}  
+
+#caja2
+
+
+datos_st_2<- ts(caja2,start = c(2011,1),end =c(2018,12),frequency = 12)
+#datos_st_2
+
+```
+
+
+```{r, out.width="55%"}
+HW1 <- HoltWinters(datos_st, seasonal = "multiplicative")
+HW1.pred <- predict(HW1, 12, prediction.interval = TRUE, level=0.95)
+plot(datos_st, ylab="candy production", xlim=c(2011,2020), main="Holt-Winters completo")
+lines(HW1$fitted[,1], lty=4, col="blue")
+lines(HW1.pred[,1], col="red")
+lines(HW1.pred[,2], lty=4, col="blue")
+lines(HW1.pred[,3], lty=4, col="blue")
+
+
+HW2 <- HoltWinters(datos_st_2, seasonal = "multiplicative")
+HW2.pred <- predict(HW2,12, prediction.interval = TRUE, level=0.95)
+plot(datos_st, ylab="candy production", xlim=c(2011,2020), main="Holt-Winters \n inicio en 2011")
+lines(HW2$fitted[,1], lty=4, col="blue")
+lines(HW2.pred[,1], col="red")
+lines(HW2.pred[,2], lty=4, col="blue")
+lines(HW2.pred[,3], lty=4, col="blue")
+
+
+```
+
+
+```{r}
+caja_pred1<-c()
+pred1<-for(j in 1:12){
+  caja_pred1<-c(caja_pred1,HW1.pred[j,1])
+}
+
+caja_pred2<-c()
+pred1<-for(j in 1:12){
+  caja_pred2<-c(caja_pred2,HW2.pred[j,1])
+}
+
+
+observados<-c()
+ob<-for(j in 1:12){
+  observados<-c(observados,filtrados[23,j])
+}
+
+suma1<-(sum((caja_pred1-observados)^2))/2
+suma1
+suma2<-(sum((caja_pred2-observados)^2))/2
+suma2
+
+```
+
+\begin{center}
+    
+\begin{tabular}{|c|c|} \hline
+     &  \multicolumn{1}{|c|}{Back Testing}\\\hline
+    Serie & MSE \\\hline
+    1997-2018 &  2305541 \\\hline
+    2011-2018 & 1597678  \\\hline
+\end{tabular}
+\end{center}
+
+Notamos que el error cuadático medio es menor en la serie con los datos al inicio del 2011, por ello nuestras suposiciones erran correctas, es mejor predecir con la serie no completa.
+
+La razón por la que decidimos cortar nuestra serie completa, fue porque habia un cambio decreciente, el cual es muy notorio alrededor de 2007-2010, y en 2011 se comenzaba a estabilizar la tendencia.
+
+Por otro lado, una razón social de este cambio se debe a que en 2011 México se adhirió al *Decenio de Acción por la Seguridad Vial 2011-2020* promovido por las Naciones Unidas, creando la *Estrategia Nacional de Seguridad Vial 2001-2020*, cuyo objetivo fue reducir los accidentes fatales y no faltales 50%, promoviendo la participación de las autoridades gubernamentales, teniendo un efecto significativo, ya que vimos que los accidentes no fueron creciendo y se han mantenido con una varianza constante, aunque podría mejorar en un futuro, con nuevas politicas de tránsito.
+
+# Referencias
+
+  - Albarrán Naranjo Lizbeth. (2021). Series de Tiempo. Facultad de Ciencias, UNAM.
+  - Paul S.P. Cowpertwait · Andrew V. Metcalfe. (2011). Introductory Time Series with R. Fairview Avenue, N. M2-B876 Seattle, Washington 98109 USA Giovanni Parmigiani: Springer.
+  - Caminos y Puentes Federales. (2021). Decenio de acción para la seguridad vial. noviembre 11,2021, de Gobierno de México Sitio web: <https://www.gob.mx/capufe/articulos/decenio-de-accion-para-la-seguridad-vial-265479#:~:text=Derivado%20de%20ello%2C%20en%20marzo,accidentes%20vehiculares%20en%20el%20mundo>
